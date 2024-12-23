@@ -30,7 +30,6 @@ class Client:
         self.client_public_key = self.client_private_key.public_key()
         self.server_public_key = None
         self.shared_key = None
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 
 def register(self: "Client", server_host: str, server_port: int) -> tuple[bool, str]:
@@ -44,6 +43,7 @@ def register(self: "Client", server_host: str, server_port: int) -> tuple[bool, 
     """
 
     try:
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((server_host, server_port))
 
         payload = {
@@ -61,9 +61,21 @@ def register(self: "Client", server_host: str, server_port: int) -> tuple[bool, 
         response = self.socket.recv(1024).decode()
         response_code, response_payload = decode_server_response(response)
         response_payload = response_payload["registration_code"]
-        print("response_payload", response_payload)
 
         if response_code.value == 2102:  # SendRegistrationCode
+            # how to send verification request with rsa 
+
+            #
+            # encrypted_verification_code = self.server_public_key.encrypt(
+            #     response_payload.encode(),
+            #     padding.OAEP(
+            #         mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            #         algorithm=hashes.SHA256(),
+            #         label=None
+            #     )
+            # )
+            # encrypted_verification_code_str = encrypted_verification_code.hex()
+
             # Send verification request
             pem_encoded_public_key = self.client_public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -79,12 +91,10 @@ def register(self: "Client", server_host: str, server_port: int) -> tuple[bool, 
                 request_code=ClientRequestCodes.VerifyCodeRequest,
                 payload=verify_payload
             )
-            print("verify_request", verify_request)
 
             self.socket.send(verify_request.encode())
 
             verify_response = self.socket.recv(1024).decode()
-            print("verify_response", verify_response)
 
             verify_code, verify_payload = decode_server_response(verify_response)
             if verify_code.value == 2100:  # RegistrationSuccess
@@ -107,6 +117,31 @@ def register(self: "Client", server_host: str, server_port: int) -> tuple[bool, 
         self.socket.close()
 
 
+def send_message(self: "Client", server_host: str, server_port: int) -> tuple[bool, str]:
+    phone_to_sent_msg = input("Please enter the number of the user you want to send a message to: ")
+    message = input("Please enter the message you want to send: ")
+    try:
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((server_host, server_port))
+        payload = {
+            "phone": phone_to_sent_msg,
+            "message": message
+        }
+        request = encode_client_request(
+            request_code=ClientRequestCodes.SendMsgToUser,
+            payload=payload
+        )
+        self.socket.send(request.encode())
+        response = self.socket.recv(1024).decode()
+        response_code, response_payload = decode_server_response(response)
+        if response_code.value == 2200:
+            return True, "Message sent successfully"
+        else:
+            return False, response_payload.get("message", "Failed to send message")
+    finally:
+        self.socket.close()
+
+
 # Example usage
 def main():
     server_host = 'localhost'  # Replace with your server's IP
@@ -121,9 +156,10 @@ def main():
             # phone = get_user_phone()
             # password = get_user_password()
             # name = input("Enter name: ")
-            phone = "0654"
-            password = "123"
-            name = "name"
+            phone = input("Enter phone number (10 digits): ")
+            password = input(
+                "Enter password (at least 8 characters, including uppercase, lowercase, number, and special character): ")
+            name = input("Enter name: ")
             client = Client(
                 password=password,
                 phone_number=phone,
@@ -131,14 +167,14 @@ def main():
             success, message = register(
                 client, server_host, server_port
             )
-
-            print(message)
             break
         elif action == 'l':
             login_user()
             break
         else:
             print("Invalid selection. Please try again.")
+
+    send_message(client, server_host, server_port)
 
 
 if __name__ == "__main__":
