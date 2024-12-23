@@ -59,43 +59,39 @@ def start_server():
 
         if verify_code.value == 1100:
             registration_code = send_by_secure_channel(client_socket)
-            server.registration_codes_and_data[registration_code] = verify_payload
+            server.registration_codes_and_data = {"registration_code": registration_code, "user_info": verify_payload}
 
         client_id = client_socket.recv(1024).decode("utf-8").strip()
         verify_code, verify_payload = decode_client_request(client_id)
         registration_code = verify_payload["verification_code"]
 
-        print("verify_payload", verify_payload)
-        print("verify_code", verify_code.value)
-        print("registration_code", registration_code)
-        print("server.registration_codes_and_data", server.registration_codes_and_data)
         if verify_code.value == 1101:
-            if registration_code in server.registration_codes_and_data:
+            if registration_code in server.registration_codes_and_data.values():
                 print(f"[SUCCESS] Registration code {registration_code} exists in server's registration codes.")
 
-                # Retrieve public key and other client data
                 public_key_str = verify_payload.get("client_public_key")
                 public_key = serialization.load_pem_public_key(public_key_str.encode("utf-8"))
-                phone = server.registration_codes_and_data["phone"]
-                password = server.registration_codes_and_data["password"]
-                name = server.registration_codes_and_data["name"]
-                print("phone", phone)
-                print("password", password)
-                print("name", name)
-                server.clients[client_id] = {
+
+                server.clients[server.registration_codes_and_data["user_info"]["phone"]] = {
                     "public_key": public_key,
-                    "phone": phone,
-                    "password": password,
-                    "name": name,
+                    "password": server.registration_codes_and_data["user_info"]["password"],
+                    "name": server.registration_codes_and_data["user_info"]["name"],
                 }
 
-                # print("server.clients", server.clients[client_id])
-                print("client: ", server.registration_codes_and_data.values())
-                print("clientsssssss: ", server.registration_codes_and_data)
-                # print("client: ", server.registration_codes_and_data, "\n\n")
+                response = encode_server_response(
+                    response_code=ServerResponseCodes.RegistrationSuccess,
+                    payload={"message": "Registration successful."}
+                )
+                try:
+                    client_socket.send(response.encode())
+
+                except Exception as e:
+                    print(f"[ERROR] Failed to send registration success response: {e}")
             else:
                 print(f"[ERROR] Registration code {registration_code} not found in server's registration codes.")
 
+            if verify_code.value == 1105:
+                pass
     # # Start a thread for sending messages from server to clients
     # threading.Thread(target=send_message_to_client, daemon=True).start()
     #
