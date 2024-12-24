@@ -1,4 +1,6 @@
 # server.py
+import errno
+
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization, hashes
 from protocol.protocol import encode_server_response, decode_client_request, ServerResponseCodes, ClientRequestCodes
@@ -64,6 +66,8 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
         self.host = "127.0.0.1"
         self.port = 12345
         self.max_clients = 10
+        self.private_key = serialization.load_pem_private_key(Server.SERVER_PRIVATE_KEY, password=None,
+                                                              backend=default_backend())
 
 
 def send_by_secure_channel(client_socket):
@@ -86,41 +90,25 @@ def send_by_secure_channel(client_socket):
 
 def start_server():
     server = Server()
-
     server.socket.bind((server.host, server.port))
     server.socket.listen(server.max_clients)
     print(f"[SERVER STARTED] Listening on {server.host}:{server.port}")
     while True:
         client_socket, client_address = server.socket.accept()
-        server_private_key = serialization.load_pem_private_key(Server.SERVER_PRIVATE_KEY, password=None,
-                                                                backend=default_backend())
-
-        usr_msg = client_socket.recv(1024)
-        decrypted_msg = server_private_key.decrypt(
-            usr_msg,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-        decoded_message = decrypted_msg.decode("utf-8").strip()
-        verify_code, verify_payload = decode_client_request(decoded_message)
+        verify_code, verify_payload = get_client_requests(server, client_socket)
 
         if verify_code == ClientRequestCodes.RegisterRequest:
             registration_code = send_by_secure_channel(client_socket)
             server.registration_codes_and_data = {"registration_code": registration_code, "user_info": verify_payload}
 
         msg = client_socket.recv(2048)
-        msg_str = msg.decode("utf-8")  # המרת bytes למחרוזת
-        msg_json = json.loads(msg_str)  # פענוח JSON
+        msg_str = msg.decode("utf-8")
+        msg_json = json.loads(msg_str)
         encrypted_chunks_base64 = msg_json["chunks"]
-
         encrypted_chunks = [base64.b64decode(chunk) for chunk in encrypted_chunks_base64]
-
         decrypted_chunks = []
         for encrypted_chunk in encrypted_chunks:
-            decrypted_chunk = server_private_key.decrypt(
+            decrypted_chunk = server.private_key.decrypt(
                 encrypted_chunk,
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
@@ -129,52 +117,90 @@ def start_server():
                 )
             )
             decrypted_chunks.append(decrypted_chunk)
-
         final_message = b"".join(decrypted_chunks)
         decoded_message = final_message.decode("utf-8").strip()
-
         verify_code, verify_payload = decode_client_request(decoded_message)
         registration_code = verify_payload["verification_code"]
 
         if verify_code == ClientRequestCodes.VerifyCodeRequest:  # VerifyCodeRequest
             if registration_code in server.registration_codes_and_data.values():
                 print(f"[SUCCESS] Registration code {registration_code} verified.")
-
                 # Store client public key
                 public_key_str = verify_payload.get("client_public_key")
                 client_public_key = serialization.load_pem_public_key(public_key_str.encode("utf-8"))
-
                 server.clients[server.registration_codes_and_data["user_info"]["phone"]] = {
                     "public_key": client_public_key,
+                    "registration_code": registration_code,
                     "password": server.registration_codes_and_data["user_info"]["password"],
                     "name": server.registration_codes_and_data["user_info"]["name"],
                 }
-
-                response = encode_server_response(
-                    response_code=ServerResponseCodes.RegistrationSuccess,
-                    payload={"message": "Registration successful."}
-                )
-                approve_reg_msg = client_public_key.encrypt(
-                    response.encode("utf-8"),
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
-                    )
-                )
-
-                client_socket.send(approve_reg_msg)
+                send_response(server, client_socket, client_public_key, ServerResponseCodes.RegistrationSuccess,
+                              {"message": "Registration successful."})
             else:
                 print(f"[ERROR] Registration code mismatch.")
-                response = encode_server_response(
-                    response_code=ServerResponseCodes.VerificationFailed,
-                    payload={"message": "Invalid registration code."}
-                )
-                client_socket.send(response.encode())
-                client_socket.close()
+                send_response(server, client_socket, None, ServerResponseCodes.RegistrationFailed,
+                              {"message": "Invalid registration code."})
 
-        if verify_code == ClientRequestCodes.SendMsgToUser:
-            pass
+        verify_code, verify_payload = get_client_requests(server, client_socket)
+        if verify_code == ClientRequestCodes.GetUserPublicKeys:
+            my_phone_number = verify_payload["my_phone"]
+            my_code = verify_payload["my_code"]
+            print("my_code: ", my_code)
+            print("my_code: ", server.clients[my_phone_number]["registration_code"])
+            print("server.clients: ", server.clients)
+            if my_phone_number in server.clients and my_code == server.clients[my_phone_number]["registration_code"]:
+                print("[SUCCESS] Retrieving user public keys.")
+                send_msg_to = verify_payload["send_msg_to"]
+                public_key_str = server.clients[my_phone_number]["public_key"]
+                if send_msg_to in server.clients:
+                    server.clients[server.registration_codes_and_data["user_info"]["phone"]] = {
+                        "public_key": server.clients[send_msg_to]["public_key"],
+                    }
+                    send_response(server, client_socket, public_key_str, ServerResponseCodes.SendingUserPublicKey, {})
+                    print("[SUCCESS] Sending user public keys.")
+                else:
+                    send_response(server, client_socket, public_key_str, ServerResponseCodes.UserNotFound, {})
+            else:
+                send_response(server, client_socket, None, ServerResponseCodes.VerificationFailed, {})
+        print("verify_code: ", verify_code)
+
+
+def get_client_requests(self, client_socket) -> tuple[ClientRequestCodes, dict]:
+    usr_msg = client_socket.recv(1024)
+    decrypted_msg = self.private_key.decrypt(
+        usr_msg,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    decoded_message = decrypted_msg.decode("utf-8").strip()
+    verify_code, verify_payload = decode_client_request(decoded_message)
+    print("verify_code: ", verify_code)
+    print("verify_payload: ", verify_payload)
+
+    return verify_code, verify_payload
+
+
+def send_response(self, client_socket, client_public_key, response_code, payload):
+    response = encode_server_response(
+        response_code=response_code,
+        payload=payload
+    )
+
+    if client_public_key is None:
+        client_socket.send(response)
+    else:
+        encrypted_response = client_public_key.encrypt(
+            response.encode("utf-8"),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        client_socket.send(encrypted_response)
 
 
 if __name__ == "__main__":
