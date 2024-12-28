@@ -87,7 +87,7 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
 
     def start_server(self, client_socket):
         while True:
-            verify_code, verify_payload = self.get_client_requests(client_socket)
+            verify_code, verify_payload = self.decrypt_msg(client_socket)
             if verify_code == ClientRequestCodes.RegisterRequest:
                 registration_code = self.send_by_secure_channel(client_socket)
                 server.registration_codes_and_data = {"registration_code": registration_code,
@@ -110,14 +110,14 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
                         "password": server.registration_codes_and_data["user_info"]["password"],
                         "name": server.registration_codes_and_data["user_info"]["name"],
                     }
-                    self.send_response(client_socket, client_public_key, ServerResponseCodes.RegistrationSuccess,
-                                       {})
+                    self.encrypt_msg(client_socket, client_public_key, ServerResponseCodes.RegistrationSuccess,
+                                     {})
                 else:
                     print(f"[ERROR] Registration code mismatch.")
-                    self.send_response(client_socket, None, ServerResponseCodes.RegistrationFailed,
-                                       {})
+                    self.encrypt_msg(client_socket, None, ServerResponseCodes.RegistrationFailed,
+                                     {})
 
-            verify_code, verify_payload = self.get_client_requests(client_socket)
+            verify_code, verify_payload = self.decrypt_msg(client_socket)
             if verify_code == ClientRequestCodes.GetUserPublicKeys:
                 my_phone_number = verify_payload["my_phone"]
                 my_code = verify_payload["my_code"]
@@ -151,16 +151,16 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
                         client_socket.sendall(json_payload.encode("utf-8"))
                         print("[SUCCESS] Sending user public keys.")
                     else:
-                        self.send_response(client_socket, public_key_str, ServerResponseCodes.UserNotFound, {})
+                        self.encrypt_msg(client_socket, public_key_str, ServerResponseCodes.UserNotFound, {})
                 else:
-                    self.send_response(client_socket, None, ServerResponseCodes.VerificationFailed, {})
+                    self.encrypt_msg(client_socket, None, ServerResponseCodes.VerificationFailed, {})
             verify_code, verify_payload = self.decrypt_long_msg(client_socket)
             if verify_code == ClientRequestCodes.SendMsgToUser:
                 send_msg_to_phone = verify_payload["message_to"]
-
+                
                 print("[SUCCESS] Sending message to user.")
 
-    def get_client_requests(self, client_socket) -> tuple[ClientRequestCodes, dict]:
+    def decrypt_msg(self, client_socket) -> tuple[ClientRequestCodes, dict]:
         usr_msg = client_socket.recv(1024)
         decrypted_msg = self.private_key.decrypt(
             usr_msg,
@@ -173,24 +173,6 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
         decoded_message = decrypted_msg.decode("utf-8").strip()
         verify_code, verify_payload = decode_client_request(decoded_message)
         return verify_code, verify_payload
-
-    def send_response(self, client_socket, client_public_key, response_code, payload):
-        response = encode_server_response(
-            response_code=response_code,
-            payload=payload
-        )
-        if client_public_key is None:
-            client_socket.send(response)
-        else:
-            encrypted_response = client_public_key.encrypt(
-                response.encode("utf-8"),
-                padding.OAEP(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None
-                )
-            )
-            client_socket.send(encrypted_response)
 
     def decrypt_long_msg(self, client_socket):
         msg = client_socket.recv(2048)
@@ -212,6 +194,24 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
         final_message = b"".join(decrypted_chunks)
         decoded_message = final_message.decode("utf-8").strip()
         return decode_client_request(decoded_message)
+    
+    def encrypt_msg(self, client_socket, client_public_key, response_code, payload):
+        response = encode_server_response(
+            response_code=response_code,
+            payload=payload
+        )
+        if client_public_key is None:
+            client_socket.send(response)
+        else:
+            encrypted_response = client_public_key.encrypt(
+                response.encode("utf-8"),
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            client_socket.send(encrypted_response)
 
     def encrypt_long_msg(self, client_socket, public_key_str, decoded_message):
         chunk_size = 190
