@@ -59,7 +59,7 @@ def register(self: "Client") -> tuple[bool, str]:
         payload=payload
     )
 
-    send_encrypted_request(self, request)
+    encrypt_msg(self, request)
     response = self.socket.recv(1024).decode()
     response_code, response_payload = decode_server_response(response)
     self.client_code = response_payload["registration_code"]
@@ -79,7 +79,7 @@ def register(self: "Client") -> tuple[bool, str]:
         json_payload = json.dumps({"chunks": encrypted_chunks_base64})
         self.socket.sendall(json_payload.encode("utf-8"))
 
-        verify_code, verify_payload = get_encrypted_response(self)
+        verify_code, verify_payload = decrypt_msg(self)
         if verify_code == ServerResponseCodes.RegistrationSuccess:
             return True, "Registration successful"
         else:
@@ -103,7 +103,7 @@ def send_message(self: "Client") -> tuple[bool, str]:
         payload=payload
     )
 
-    send_encrypted_request(self, send_msg_req)
+    encrypt_msg(self, send_msg_req)
     server_respnse, user_public_key = decrypt_long_msg(self)
     if server_respnse == ServerResponseCodes.UserNotFound:
         return False, "User not found"
@@ -151,6 +151,20 @@ def send_message(self: "Client") -> tuple[bool, str]:
         return False, response_payload.get("message", "Failed to send message")
 
 
+def decrypt_msg(self: "Client"):
+    verify_response = self.socket.recv(1024)
+
+    decrypted_msg = self.client_private_key.decrypt(
+        verify_response,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return decode_server_response(decrypted_msg.decode("utf-8"))
+
+
 def decrypt_long_msg(self) -> tuple[ClientRequestCodes, int]:
     msg = self.socket.recv(2048)
     msg_str = msg.decode("utf-8")
@@ -173,7 +187,7 @@ def decrypt_long_msg(self) -> tuple[ClientRequestCodes, int]:
     return decode_server_response(decoded_message)
 
 
-def send_encrypted_request(self: "Client", request):
+def encrypt_msg(self: "Client", request):
     ciphertext = self.server_public_key.encrypt(
         request.encode("utf-8"),
         padding.OAEP(
@@ -183,28 +197,6 @@ def send_encrypted_request(self: "Client", request):
         )
     )
     self.socket.sendall(ciphertext)
-
-
-def get_encrypted_response(self: "Client"):
-    verify_response = self.socket.recv(1024)
-
-    decrypted_msg = self.client_private_key.decrypt(
-        verify_response,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None
-        )
-    )
-    return decode_server_response(decrypted_msg.decode("utf-8"))
-
-
-def get_my_public_key(self: "Client"):
-    pem_encoded_public_key = self.client_public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    return pem_encoded_public_key
 
 
 def encrypt_long_msg(self: "Client", public_key, decoded_message: str) -> list[str]:
@@ -225,6 +217,14 @@ def encrypt_long_msg(self: "Client", public_key, decoded_message: str) -> list[s
         encrypted_chunks.append(encrypted_chunk)
     encrypted_chunks_base64 = [base64.b64encode(chunk).decode('utf-8') for chunk in encrypted_chunks]
     return encrypted_chunks_base64
+
+
+def get_my_public_key(self: "Client"):
+    pem_encoded_public_key = self.client_public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return pem_encoded_public_key
 
 
 # Example usage
