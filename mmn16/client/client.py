@@ -59,7 +59,9 @@ def register(self: "Client") -> tuple[bool, str]:
         payload=payload
     )
 
-    encrypt_msg(self, request)
+    encrypted_msg = encrypt_message(self, self.server_public_key, request)
+    self.socket.sendall(encrypted_msg)
+
     response = self.socket.recv(1024).decode()
     response_code, response_payload = decode_server_response(response)
     self.client_code = response_payload["registration_code"]
@@ -75,11 +77,13 @@ def register(self: "Client") -> tuple[bool, str]:
             request_code=ClientRequestCodes.VerifyCodeRequest,
             payload=verify_payload
         )
-        encrypted_chunks_base64 = encrypt_long_msg(self, self.server_public_key, decoded_message)
+        encrypted_chunks_base64 = encrypt_message(self, self.server_public_key, decoded_message, True)
         json_payload = json.dumps({"chunks": encrypted_chunks_base64})
         self.socket.sendall(json_payload.encode("utf-8"))
 
-        verify_code, verify_payload = decrypt_msg(self)
+        received_data = self.socket.recv(1024)
+        verify_code, verify_payload = decrypt_message(self, received_data, 1024)
+
         if verify_code == ServerResponseCodes.RegistrationSuccess:
             return True, "Registration successful"
         else:
@@ -99,16 +103,17 @@ def send_message(self: "Client") -> tuple[bool, str]:
     }
 
     send_msg_req = encode_client_request(
-        request_code=ClientRequestCodes.GetUserPublicKeys,
+        request_code=ClientRequestCodes.GetUserPublicKey,
         payload=payload
     )
 
-    encrypt_msg(self, send_msg_req)
-    server_respnse, user_public_key = decrypt_long_msg(self)
+    encrypted_msg = encrypt_message(self, self.server_public_key, send_msg_req)
+    self.socket.sendall(encrypted_msg)
+
+    received_data = self.socket.recv(2048)
+    server_respnse, user_public_key = decrypt_message(self, received_data)
     if server_respnse == ServerResponseCodes.UserNotFound:
         return False, "User not found"
-    print("server_respnse", server_respnse)
-    print("user_public_key", user_public_key)
     public_key_str = user_public_key.get("client_public_key")
     client_public_key = serialization.load_pem_public_key(public_key_str.encode("utf-8"))
 
@@ -122,10 +127,10 @@ def send_message(self: "Client") -> tuple[bool, str]:
         request_code=ClientRequestCodes.SendMsgToUser,
         payload=payload
     )
-
-    encrypted_msg_to_user = encrypt_long_msg(self, client_public_key, msg_to_user)
+    encrypted_msg_to_user = encrypt_message(self, client_public_key, msg_to_user, True)
 
     payload = {
+        "message_from": self.phone_number,
         "message_to": phone_to_sent_msg,
         "message": encrypted_msg_to_user,
     }
@@ -135,22 +140,220 @@ def send_message(self: "Client") -> tuple[bool, str]:
         payload=payload
     )
 
-    encrypted_msg_to_server = encrypt_long_msg(self, self.server_public_key, msg_to_server)
+    encrypted_msg_to_server = encrypt_message(self, self.server_public_key, msg_to_server, True)
     json_payload = json.dumps({"chunks": encrypted_msg_to_server})
     self.socket.sendall(json_payload.encode("utf-8"))
-    # *** until here
+    # print("json_payload:", json_payload)
 
-    response = self.socket.recv(1024).decode()
-
-    response_code, response_payload = decode_server_response(response)
-    if response_code.value == 2200:
+    received_data = self.socket.recv(1024)
+    server_respnse, payload = decrypt_message(self, received_data, 1024)
+    print("server_respnse:", server_respnse)
+    print("payload:", payload)
+    if server_respnse == ServerResponseCodes.SendingMessageToUser:
         return True, "Message sent successfully"
-    elif response_code.value == ServerResponseCodes.UserNotFound:
+    elif server_respnse == ServerResponseCodes.UserNotFound:
         return False, "User not found"
     else:
-        return False, response_payload.get("message", "Failed to send message")
+        return False, "Failed to send message"
 
 
+def receive_messages(self: "Client"):
+    received_data = self.socket.recv(2048)
+    server_respnse, msg = decrypt_message(self, received_data)
+    while True:
+        if server_respnse == ServerResponseCodes.UserSendsMessage:
+            print("server_respnse:", server_respnse)
+            print("msg:", msg)
+            server_respnse, user_public_key = decrypt_message(self, msg)
+
+            print("server_respnse:", server_respnse)
+            print("msg:", msg)
+            break
+
+
+def encrypt_message(self, public_key, request, long_msg=False, chunk_size=190):
+    """
+    Encrypts a request and sends it to the server. Handles both short and long messages.
+
+    Args:
+        request: The message to be sent.
+        chunk_size: Max size for each encrypted chunk.
+        :param long_msg:
+        :param chunk_size:
+        :param request:
+        :param public_key:
+        :param self:
+    """
+
+    message_bytes = request.encode("utf-8")
+    if not long_msg:
+        encrypted_message = public_key.encrypt(
+            message_bytes,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return encrypted_message
+    else:
+        chunks = [message_bytes[i:i + chunk_size] for i in range(0, len(message_bytes), chunk_size)]
+        encrypted_chunks = [
+            base64.b64encode(public_key.encrypt(
+                chunk,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )).decode("utf-8") for chunk in chunks
+        ]
+
+        return encrypted_chunks
+
+
+def decrypt_message(self, received_data, buffer_size=2048):
+    """
+    Decrypts a response received from the server. Handles both short and long messages.
+
+    Args:
+        buffer_size: The size of the buffer for receiving data.
+
+    Returns:
+        Decoded response from the server.
+        :param received_data:
+        :param buffer_size:
+        :param self:
+    """
+    if buffer_size > 1024:
+        data_str = received_data.decode("utf-8")
+        msg_json = json.loads(data_str)
+        encrypted_chunks_base64 = msg_json["chunks"]
+        encrypted_chunks = [base64.b64decode(chunk) for chunk in encrypted_chunks_base64]
+        decrypted_chunks = [
+            self.client_private_key.decrypt(
+                chunk,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            ) for chunk in encrypted_chunks
+        ]
+        final_message = b"".join(decrypted_chunks)
+    else:
+        # Handle short message decryption
+        final_message = self.client_private_key.decrypt(
+            received_data,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+    return decode_server_response(final_message.decode("utf-8"))
+
+
+def get_my_public_key(self: "Client"):
+    pem_encoded_public_key = self.client_public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return pem_encoded_public_key
+
+
+# Example usage
+def main():
+    # phone = get_user_phone()
+    # password = get_user_password()
+    # name = input("Enter name: ")
+    # client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # client_socket.connect((HOST, PORT))
+
+    print("Welcome to the chat.")
+    phone = input("Enter phone number (10 digits): ")
+    password = input(
+        "Enter password (at least 8 characters, including uppercase, lowercase, number, and special character): ")
+    name = input("Enter name: ")
+    client = Client(
+        password=password,
+        phone_number=phone,
+        name=name)
+    print("Welcome ", name, " to the chat. Please select an action:")
+
+    while True:
+        action = input("Press 'l' to login or 'r' to register: ")
+        if action == 'r':
+            register(client)
+            break
+        elif action == 'l':
+            login_user()
+            break
+        else:
+            print("Invalid selection. Please try again.\n")
+
+    while True:
+        action = input("choose an action(s-send message, r-receive message, q-quit): ")
+        if action == 's':
+            status, status_str = send_message(client)
+            print(status_str)
+            print(status)
+        elif action == 'r':
+            receive_messages(client)
+        elif action == 'q':
+            print("Goodbye!")
+            client.socket.close()
+            break
+        else:
+            print("Invalid selection. Please try again.\n")
+    # threading.Thread(target=receive_messages, args=(client,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()
+
+
+def get_user_phone():
+    while True:
+        phone_number = input("Enter phone number (10 digits): ")
+        if phone_number.isdigit() and len(phone_number) == 10:
+            break
+        else:
+            print("Invalid phone number. Try again.")
+            continue
+
+    return phone_number
+
+
+def get_user_password():
+    while True:
+        password = input(
+            "Enter password (at least 8 characters, including uppercase, lowercase, number, and special character): ")
+        if is_valid_password(password):
+            break
+        else:
+            print("Invalid password. Try again.")
+            continue
+
+    return password
+
+
+def is_valid_password(password):
+    if len(password) < 8:
+        return False
+    if not re.search(r"[A-Z]", password):
+        return False
+    if not re.search(r"[a-z]", password):
+        return False
+    if not re.search(r"[0-9]", password):
+        return False
+    if not re.search(r"[!?@#$%^&*(),.]", password):
+        return False
+    return True
+
+
+"""
 def decrypt_msg(self: "Client"):
     verify_response = self.socket.recv(1024)
 
@@ -217,93 +420,7 @@ def encrypt_long_msg(self: "Client", public_key, decoded_message: str) -> list[s
         encrypted_chunks.append(encrypted_chunk)
     encrypted_chunks_base64 = [base64.b64encode(chunk).decode('utf-8') for chunk in encrypted_chunks]
     return encrypted_chunks_base64
-
-
-def get_my_public_key(self: "Client"):
-    pem_encoded_public_key = self.client_public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    return pem_encoded_public_key
-
-
-# Example usage
-def main():
-    # phone = get_user_phone()
-    # password = get_user_password()
-    # name = input("Enter name: ")
-    print("Welcome to the chat.")
-    phone = input("Enter phone number (10 digits): ")
-    password = input(
-        "Enter password (at least 8 characters, including uppercase, lowercase, number, and special character): ")
-    name = input("Enter name: ")
-    client = Client(
-        password=password,
-        phone_number=phone,
-        name=name)
-    print("Welcome ", name, " to the chat. Please select an action:")
-
-    while True:
-        action = input("Press 'l' to login or 'r' to register: ")
-        if action == 'r':
-            register(client)
-            break
-        elif action == 'l':
-            login_user()
-            break
-        else:
-            print("Invalid selection. Please try again.\n")
-    action = input("choose an action(s-send message, q-quit): ")
-    if action == 's':
-        status, status_str = send_message(client)
-        print(status_str)
-        print(status)
-    elif action == 'q':
-        print("Goodbye!")
-        client.socket.close()
-
-
-if __name__ == "__main__":
-    main()
-
-
-def get_user_phone():
-    while True:
-        phone_number = input("Enter phone number (10 digits): ")
-        if phone_number.isdigit() and len(phone_number) == 10:
-            break
-        else:
-            print("Invalid phone number. Try again.")
-            continue
-
-    return phone_number
-
-
-def get_user_password():
-    while True:
-        password = input(
-            "Enter password (at least 8 characters, including uppercase, lowercase, number, and special character): ")
-        if is_valid_password(password):
-            break
-        else:
-            print("Invalid password. Try again.")
-            continue
-
-    return password
-
-
-def is_valid_password(password):
-    if len(password) < 8:
-        return False
-    if not re.search(r"[A-Z]", password):
-        return False
-    if not re.search(r"[a-z]", password):
-        return False
-    if not re.search(r"[0-9]", password):
-        return False
-    if not re.search(r"[!?@#$%^&*(),.]", password):
-        return False
-    return True
+"""
 
 
 # def receive_messages(sock):
@@ -317,7 +434,7 @@ def is_valid_password(password):
 #         except ConnectionResetError:
 #             print("[DISCONNECTED] Server disconnected.")
 #             break
-#
+
 # def main():
 #     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 #     client_socket.connect((HOST, PORT))
@@ -342,6 +459,8 @@ def is_valid_password(password):
 
 def login_user():
     pass
+    """
+
     # phone_number = input("Enter phone number: ")
     # password = input("Enter password: ")
 
@@ -362,3 +481,66 @@ def login_user():
 #     with open("../users.txt", "a") as file:
 #         file.write(f"{phone_number},{password}\n")
 #     print("Registration successful!")
+
+
+
+
+# def main():
+#     print("Welcome to the chat.")
+#     phone = input("Enter phone number (10 digits): ")
+#     password = input(
+#         "Enter password (at least 8 characters, including uppercase, lowercase, number, and special character): ")
+#     name = input("Enter name: ")
+#     client = Client(
+#         password=password,
+#         phone_number=phone,
+#         name=name)
+#     print(f"Welcome {name} to the chat. Please select an action:")
+# 
+#     # Start a thread for receiving messages
+#     recv_thread = threading.Thread(target=receive_messages_thread, args=(client,), daemon=True)
+#     recv_thread.start()
+# 
+#     while True:
+#         action = input("Press 'l' to login, 'r' to register, 's' to send message, or 'q' to quit: ")
+#         if action == 'r':
+#             reg_thread = threading.Thread(target=register_thread, args=(client,))
+#             reg_thread.start()
+#             reg_thread.join()  # Optional: Wait for registration to complete
+#         elif action == 's':
+#             send_thread = threading.Thread(target=send_message_thread, args=(client,))
+#             send_thread.start()
+#         elif action == 'q':
+#             print("Goodbye!")
+#             client.socket.close()
+#             break
+#         else:
+#             print("Invalid selection. Please try again.\n")
+
+
+def receive_messages_thread(client: Client):
+    while True:
+        try:
+            receive_messages(client)
+            # print(f"New message received: {message}")
+        except Exception as e:
+            print(f"Error while receiving messages: {e}")
+            break
+
+
+# Function to handle registration
+def register_thread(client: Client):
+    success, message = register(client)
+    print(message)
+
+
+# Function to handle sending messages
+def send_message_thread(client: Client):
+    while True:
+        try:
+            status, status_str = send_message(client)
+            print(status_str)
+        except Exception as e:
+            print(f"Error while sending messages: {e}")
+            break
+"""
