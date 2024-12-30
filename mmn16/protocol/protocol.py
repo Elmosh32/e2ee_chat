@@ -1,5 +1,14 @@
 # protocol.py
+import base64
+import base64
+import json
+import random
+import socket
+from threading import Thread
 
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 # import json
 # from enum import Enum
 # from typing import Tuple
@@ -131,6 +140,7 @@ class ClientRequestCodes(Enum):
     SendAES = 1104
     SendMsgToUser = 1105
     SendMsgToOfflineUser = 1106
+    GetUserPublicKey = 1107
 
 
 ################################## Response builders ##################################
@@ -147,6 +157,10 @@ class ServerResponseCodes(Enum):
     MessageOk = 2108
     UserOnline = 2109
     UserOffline = 2110
+    UserNotFound = 2111
+    SendingUserPublicKey = 2112
+    SendingMessageToUser = 2113
+    UserSendsMessage = 2114
 
 
 ################################## Protocol Helper Functions ##################################
