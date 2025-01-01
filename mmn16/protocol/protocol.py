@@ -165,73 +165,69 @@ class ServerResponseCodes(Enum):
 
 ################################## Protocol Helper Functions ##################################
 
-# קידוד בקשות ללקוחות לפורמט JSON
-def encode_client_request(request_code: ClientRequestCodes, payload: dict) -> str:
-    """
-    Encodes a client request into a JSON string.
-
-    :param request_code: The ClientRequestCodes Enum value.
-    :param payload: The additional data to include in the request.
-    :return: Encoded JSON string.
-    """
+def encode_client_request(payload) -> str:
     return json.dumps({
-        "request_code": request_code.value,
         "payload": payload
     })
 
 
-# פענוח בקשות לקוחות מהפורמט JSON
-def decode_client_request(request: str) -> Tuple[ClientRequestCodes, dict]:
-    """
-    Decodes a client request from a JSON string.
-
-    :param request: JSON-encoded string from client.
-    :return: Tuple of request code (ClientRequestCodes) and payload (dict).
-    """
+def decode_client_request(request: str):
     if not request:
         raise ValueError("not request ....... Invalid client request format: Request is empty or not a string.")
     elif not isinstance(request, str):
         raise ValueError("not isinstance .......... Invalid client request format: Request is empty or not a string.")
     try:
         data = json.loads(request)
-        request_code = ClientRequestCodes(data["request_code"])
         payload = data.get("payload", {})
         if not isinstance(payload, dict):
             raise ValueError("Invalid payload format.")
-        return request_code, payload
+        return payload
     except (KeyError, ValueError, json.JSONDecodeError) as e:
         raise ValueError(f"Invalid client request format: {e}")
 
 
-# קידוד תגובות שרת לפורמט JSON
-def encode_server_response(response_code: ServerResponseCodes, payload: dict = None) -> str:
-    """
-    Encodes a server response into a JSON string.
+def encode_client_request_code(request_code):
+    return json.dumps({
+        "request_code": request_code.value
+    }).encode("utf-8")
 
-    :param response_code: The ServerResponseCodes Enum value.
-    :param payload: The additional data to include in the response.
-    :return: Encoded JSON string.
-    """
+
+def decode_client_request_code(request: str) -> ClientRequestCodes:
+    try:
+        data = json.loads(request)
+        request_code = data.get("request_code", {})
+        return request_code
+    except (KeyError, ValueError):
+        raise ValueError("Invalid server response format.")
+
+
+def encode_server_response(payload):
     if payload is None:
         payload = {}
     return json.dumps({
-        "response_code": response_code.value,
         "payload": payload
-    })
+    }).encode("utf-8")
 
 
-# פענוח תגובות שרת מפורמט JSON
-def decode_server_response(response: str) -> (ServerResponseCodes, dict):
-    """
-    Decodes a server response from a JSON string.
-
-    :param response: JSON-encoded string from server.
-    :return: Tuple of response code (ServerResponseCodes) and payload (dict).
-    """
+def decode_server_response(response: str) -> dict:
     try:
         data = json.loads(response)
-        response_code = ServerResponseCodes(data["response_code"])
         payload = data.get("payload", {})
-        return response_code, payload
+        return payload
+    except (KeyError, ValueError):
+        raise ValueError("Invalid server response format.")
+
+
+def encode_server_response_code(response_code):
+    return json.dumps({
+        "response_code": response_code.value
+    }).encode("utf-8")
+
+
+def decode_server_response_code(response: str) -> ServerResponseCodes:
+    try:
+        data = json.loads(response)
+        response_code = data.get("response_code", {})
+        return response_code
     except (KeyError, ValueError):
         raise ValueError("Invalid server response format.")
