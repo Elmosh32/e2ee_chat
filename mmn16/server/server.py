@@ -9,7 +9,9 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from protocol.protocol import encode_server_response, decode_client_request, ServerResponseCodes, ClientRequestCodes
+from protocol.protocol import encode_server_response_code, encode_server_response, decode_client_request, \
+    decode_client_request_code, \
+    ServerResponseCodes, ClientRequestCodes
 
 
 # Server configuration
@@ -68,189 +70,174 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
         self.socket.bind((host, port))
         self.socket.listen(max_clients)
 
-    def send_by_secure_channel(self, client_socket):
+    @staticmethod
+    def send_by_secure_channel(client_socket):
         registration_code = random.randint(100000, 999999)
         payload = {
             "registration_code": registration_code,
         }
 
-        # Encode the request using the protocol
-        response = encode_server_response(
-            response_code=ServerResponseCodes.SendRegistrationCode,
-            payload=payload
-        )
+        response_code = encode_server_response_code(ServerResponseCodes.SendRegistrationCode)
+        response = encode_server_response(payload)
         try:
-            client_socket.send(response.encode())
+            client_socket.send(response_code)
+            client_socket.send(response)
             return registration_code
         except Exception as e:
             print(f"[ERROR] Failed to send registration code: {e}")
 
     def start_server(self, client_socket):
         while True:
-            verify_code, verify_payload = self.decrypt_message(client_socket, 1024)
-            if verify_code == ClientRequestCodes.RegisterRequest:
-                registration_code = self.send_by_secure_channel(client_socket)
-                server.registration_codes_and_data = {"registration_code": registration_code,
-                                                      "user_info": verify_payload}
+            request_code = client_socket.recv(22)
+            code = decode_client_request_code(request_code)
+            match code:
+                case ClientRequestCodes.RegisterRequest.value:
+                    self.handle_registerion_request(client_socket)
+                case ClientRequestCodes.VerifyCodeRequest.value:
+                    self.handle_verify_request(client_socket)
+                case ClientRequestCodes.GetUserPublicKey.value:
+                    self.handle_sending_user_pkey(client_socket)
+                case ClientRequestCodes.SendMsgToUser.value:
+                    self.handle_send_msg_to_user(client_socket)
 
-            verify_code, verify_payload = self.decrypt_message(client_socket, 2048)
-            registration_code = verify_payload["verification_code"]
+    def handle_registerion_request(self, client_socket):
+        registration_code = self.send_by_secure_channel(client_socket)
+        encrypted_payload = client_socket.recv(2048)
+        payload = self.decrypt_message(encrypted_payload)
+        server.registration_codes_and_data = {"registration_code": registration_code,
+                                              "user_info": payload}
 
-            if verify_code == ClientRequestCodes.VerifyCodeRequest:  # VerifyCodeRequest
-                if registration_code in server.registration_codes_and_data.values():
-                    print(f"[SUCCESS] Registration code {registration_code} verified.")
-                    public_key_str = verify_payload.get("client_public_key")
-                    client_public_key = serialization.load_pem_public_key(public_key_str.encode("utf-8"))
+    def handle_verify_request(self, client_socket):
+        encrypted_payload = client_socket.recv(2048)
+        payload = self.decrypt_message(encrypted_payload)
+        registration_code = payload["verification_code"]
 
-                    server.clients[server.registration_codes_and_data["user_info"]["phone"]] = {
-                        "public_key": client_public_key,
-                        "registration_code": registration_code,
-                        "socket": client_socket,
-                        "password": server.registration_codes_and_data["user_info"]["password"],
-                        "name": server.registration_codes_and_data["user_info"]["name"],
-                    }
-                    encrypted_response = self.encrypt_message(client_socket, client_public_key,
-                                                              ServerResponseCodes.RegistrationSuccess,
-                                                              {})
-                    client_socket.send(encrypted_response)
-                else:
-                    print(f"[ERROR] Registration code mismatch.")
-                    self.encrypt_message(client_socket, None, ServerResponseCodes.RegistrationFailed,
-                                         {})
+        if registration_code in server.registration_codes_and_data.values():
+            print(f"[SUCCESS] Registration code {registration_code} verified.")
+            public_key_str = payload.get("client_public_key")
+            client_public_key = serialization.load_pem_public_key(public_key_str.encode("utf-8"))
 
-            verify_code, verify_payload = self.decrypt_message(client_socket, 1024)
-            if verify_code == ClientRequestCodes.GetUserPublicKey:
-                my_phone_number = verify_payload["my_phone"]
-                my_code = verify_payload["my_code"]
-                if my_phone_number in server.clients and my_code == server.clients[my_phone_number][
-                    "registration_code"]:
-                    print("[SUCCESS] Retrieving user public keys.")
-                    send_msg_to = verify_payload["send_msg_to"]
-                    public_key_str = server.clients[my_phone_number]["public_key"]
-                    if send_msg_to in server.clients:
-                        public_key = server.clients[send_msg_to]["public_key"]
+            server.clients[server.registration_codes_and_data["user_info"]["phone"]] = {
+                "public_key": client_public_key,
+                "registration_code": registration_code,
+                "socket": client_socket,
+                "password": server.registration_codes_and_data["user_info"]["password"],
+                "name": server.registration_codes_and_data["user_info"]["name"],
+            }
+            # encrypted_response = self.encrypt_message(client_socket, client_public_key, {})
+            # json_payload = json.dumps({"chunks": encrypted_response})
+            response_code = encode_server_response_code(ServerResponseCodes.RegistrationSuccess)
+            client_socket.send(response_code)
 
-                        pem_encoded_public_key = public_key.public_bytes(
-                            encoding=serialization.Encoding.PEM,
-                            format=serialization.PublicFormat.SubjectPublicKeyInfo
-                        )
-                        req_public_key_str = pem_encoded_public_key.decode("utf-8")
+            # client_socket.sendall(json_payload.encode("utf-8"))
+        else:
+            print(f"[ERROR] Registration code mismatch.")
+            client_socket.send(ServerResponseCodes.RegistrationFailed)
 
-                        verify_payload = {
-                            "client_public_key": req_public_key_str
-                        }
-                        print("verify_payload: ", verify_payload)
+    def handle_sending_user_pkey(self, client_socket):
+        encrypted_payload = client_socket.recv(2048)
+        payload = self.decrypt_message(encrypted_payload)
 
-                        encrypted_msg_from_client = self.encrypt_message(client_socket, public_key_str,
-                                                                         ServerResponseCodes.SendingUserPublicKey,
-                                                                         verify_payload)
-                        json_payload = json.dumps({"chunks": encrypted_msg_from_client})
-                        client_socket.sendall(json_payload.encode("utf-8"))
-                        print("[SUCCESS] Sending user public keys.")
+        my_phone_number = payload["my_phone"]
+        my_code = payload["my_code"]
+        if my_phone_number in server.clients and my_code == server.clients[my_phone_number][
+            "registration_code"]:
+            print("[SUCCESS] Retrieving user public keys.")
+            send_msg_to = payload["send_msg_to"]
+            public_key_str = server.clients[my_phone_number]["public_key"]
+            if send_msg_to in server.clients:
+                public_key = server.clients[send_msg_to]["public_key"]
 
-                    else:
-                        encrypted_msg = self.encrypt_message(client_socket, public_key_str,
-                                                             ServerResponseCodes.UserNotFound, {})
-                        client_socket.send(encrypted_msg)
+                pem_encoded_public_key = public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                )
+                req_public_key_str = pem_encoded_public_key.decode("utf-8")
 
-                else:
-                    encrypted_msg = self.encrypt_message(client_socket, None, ServerResponseCodes.VerificationFailed,
-                                                         {})
-                    client_socket.send(encrypted_msg)
-
-            verify_code, verify_payload = self.decrypt_message(client_socket)
-            if verify_code == ClientRequestCodes.SendMsgToUser:
-                print("here in send msg to user")
+                verify_payload = {
+                    "client_public_key": req_public_key_str
+                }
                 print("verify_payload: ", verify_payload)
-                my_phone_number = verify_payload["message_from"]
-                send_msg_to_phone = verify_payload["message_to"]
-                client_socket_to_send_msg = server.clients[send_msg_to_phone]["socket"]
-                public_key_str = server.clients[send_msg_to_phone]["public_key"]
-                encrypted_msg = self.encrypt_message(client_socket_to_send_msg, public_key_str,
-                                                     ServerResponseCodes.UserSendsMessage, verify_payload["message"])
-                json_payload = json.dumps({"chunks": encrypted_msg})
-                client_socket_to_send_msg.sendall(json_payload.encode("utf-8"))
+                payload = encode_server_response(verify_payload)
+                encrypted_msg_from_client = self.encrypt_message(client_socket, public_key_str, payload)
+                json_payload = json.dumps({"chunks": encrypted_msg_from_client})
+                response_code = encode_server_response_code(ServerResponseCodes.RegistrationSuccess)
+                client_socket.send(response_code)
+                print("here response_code: ", response_code)
+                client_socket.sendall(json_payload.encode("utf-8"))
+                print("[SUCCESS] Sending user public keys.")
 
-                asking_service_public_key = server.clients[my_phone_number]["public_key"]
-                encrypted_msg = self.encrypt_message(client_socket, asking_service_public_key,
-                                                     ServerResponseCodes.SendingMessageToUser, {})
-                client_socket.send(encrypted_msg)
-                print("[SUCCESS] Sending message to user.")
+            else:
+                client_socket.send(ServerResponseCodes.UserNotFound)
+        else:
+            client_socket.send(ServerResponseCodes.VerificationFailed)
 
-    def encrypt_message(self, client_socket, client_public_key, response_code_msg, payload, chunk_size=190):
-        """
-        Encrypts a message and sends it to the client. Handles both short and long messages.
+    def handle_send_msg_to_user(self, client_socket):
+        encrypted_request = client_socket.recv(2048)
+        verify_payload = self.decrypt_message(encrypted_request)
+        print("verify_payload: ", verify_payload)
+        my_phone_number = verify_payload["message_from"]
+        send_msg_to_phone = verify_payload["message_to"]
+        client_socket_to_send_msg = server.clients[send_msg_to_phone]["socket"]
+        public_key_str = server.clients[send_msg_to_phone]["public_key"]
+        payload = encode_server_response(verify_payload)
+        print("payload:", payload)
+        encrypted_msg = self.encrypt_message(client_socket_to_send_msg, public_key_str, payload)
+        json_payload = json.dumps({"chunks": encrypted_msg})
+        response_code = encode_server_response_code(ServerResponseCodes.UserSendsMessage)
+        client_socket_to_send_msg.send(response_code)
+        client_socket_to_send_msg.sendall(json_payload.encode("utf-8"))
 
-        Args:
-            client_socket: The socket object for communication.
-            client_public_key: Public key of the client for encryption.
-            response_code_msg: Response code to include in the message.
-            payload: Message payload.
-            chunk_size: Max size for each encrypted chunk.
-        """
-        response = encode_server_response(
-            response_code=response_code_msg,
-            payload=payload
-        )
-        # response = encode_server_response(response_code, payload)
-        message_bytes = response.encode("utf-8")
+        response_code = encode_server_response_code(ServerResponseCodes.SendingMessageToUser)
+        print("size of response_code: ", len(response_code))
+        client_socket.send(response_code)
+        # client_socket.sendall(json_payload.encode("utf-8"))
+        print("[SUCCESS] Sending message to user.")
+
+    def send_response_code(self, client_socket, response):
+        response_code = json.dumps({"response_code": response.value})
+        self.socket.send(response.encode("utf-8"))
+
+    def encrypt_message(self, client_socket, client_public_key, payload, chunk_size=190):
+        # response = encode_server_response(
+        #     response_code=response_code_msg,
+        #     payload=payload
+        # )
+        # # response = encode_server_response(response_code, payload)
+        # message_bytes = response.encode("utf-8")
 
         if client_public_key is None:
-            client_socket.send(message_bytes)
+            client_socket.send(payload)
         else:
-            if len(message_bytes) <= chunk_size:
-                encrypted_message = client_public_key.encrypt(
-                    message_bytes,
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
-                    )
-                )
-                return encrypted_message
-            else:
-                chunks = [message_bytes[i:i + chunk_size] for i in range(0, len(message_bytes), chunk_size)]
-                encrypted_chunks = [
-                    base64.b64encode(client_public_key.encrypt(
-                        chunk,
-                        padding.OAEP(
-                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                            algorithm=hashes.SHA256(),
-                            label=None
-                        )
-                    )).decode("utf-8") for chunk in chunks
-                ]
-                return encrypted_chunks
-
-    def decrypt_message(self, client_socket, buffer_size=2048):
-        if buffer_size > 1024:
-            received_data = client_socket.recv(2048)
-            data_str = received_data.decode("utf-8")
-            msg_json = json.loads(data_str)
-            encrypted_chunks_base64 = msg_json["chunks"]
-            encrypted_chunks = [base64.b64decode(chunk) for chunk in encrypted_chunks_base64]
-            decrypted_chunks = [
-                self.private_key.decrypt(
+            chunks = [payload[i:i + chunk_size] for i in range(0, len(payload), chunk_size)]
+            encrypted_chunks = [
+                base64.b64encode(client_public_key.encrypt(
                     chunk,
                     padding.OAEP(
                         mgf=padding.MGF1(algorithm=hashes.SHA256()),
                         algorithm=hashes.SHA256(),
                         label=None
                     )
-                ) for chunk in encrypted_chunks
+                )).decode("utf-8") for chunk in chunks
             ]
-            final_message = b"".join(decrypted_chunks)
-        else:
-            received_data = client_socket.recv(1024)
-            # Handle short message decryption
-            final_message = self.private_key.decrypt(
-                received_data,
+            return encrypted_chunks
+
+    def decrypt_message(self, encrypted_msg):
+        data_str = encrypted_msg.decode("utf-8")
+        msg_json = json.loads(data_str)
+        encrypted_chunks_base64 = msg_json["chunks"]
+        encrypted_chunks = [base64.b64decode(chunk) for chunk in encrypted_chunks_base64]
+        decrypted_chunks = [
+            self.private_key.decrypt(
+                chunk,
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
                     label=None
                 )
-            )
+            ) for chunk in encrypted_chunks
+        ]
+        final_message = b"".join(decrypted_chunks)
 
         decoded_message = final_message.decode("utf-8").strip()
         return decode_client_request(decoded_message)
