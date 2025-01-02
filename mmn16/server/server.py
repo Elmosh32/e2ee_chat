@@ -10,14 +10,14 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from protocol.protocol import encode_server_response_code, encode_server_response, decode_client_request, \
-    decode_client_request_code, \
-    ServerResponseCodes, ClientRequestCodes
-
+    decode_client_request_code, ServerResponseCodes, ClientRequestCodes
 
 # Server configuration
-# HOST = "127.0.0.1"
-# PORT = 12345
-# MAX_CLIENTS = 10
+HOST = "127.0.0.1"
+PORT = 12345
+MAX_CLIENTS = 10
+
+
 # server_socket.bind(('0.0.0.0', 12345))
 
 class Server:
@@ -89,6 +89,10 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
     def start_server(self, client_socket):
         while True:
             request_code = client_socket.recv(22)
+            if not request_code:
+                self.handle_client
+                print("client disconnected")
+                break
             code = decode_client_request_code(request_code)
             match code:
                 case ClientRequestCodes.RegisterRequest.value:
@@ -99,6 +103,8 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
                     self.handle_sending_user_pkey(client_socket)
                 case ClientRequestCodes.SendMsgToUser.value:
                     self.handle_send_msg_to_user(client_socket)
+                case ClientRequestCodes.DisconnectRequest.value:
+                    self.handle_client_disconected()
 
     def handle_registerion_request(self, client_socket):
         registration_code = self.send_by_secure_channel(client_socket)
@@ -111,28 +117,22 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
         encrypted_payload = client_socket.recv(2048)
         payload = self.decrypt_message(encrypted_payload)
         registration_code = payload["verification_code"]
-
         if registration_code in server.registration_codes_and_data.values():
             print(f"[SUCCESS] Registration code {registration_code} verified.")
             public_key_str = payload.get("client_public_key")
             client_public_key = serialization.load_pem_public_key(public_key_str.encode("utf-8"))
-
             server.clients[server.registration_codes_and_data["user_info"]["phone"]] = {
                 "public_key": client_public_key,
                 "registration_code": registration_code,
                 "socket": client_socket,
+                "connected": True,
                 "password": server.registration_codes_and_data["user_info"]["password"],
                 "name": server.registration_codes_and_data["user_info"]["name"],
             }
-            # encrypted_response = self.encrypt_message(client_socket, client_public_key, {})
-            # json_payload = json.dumps({"chunks": encrypted_response})
-            response_code = encode_server_response_code(ServerResponseCodes.RegistrationSuccess)
-            client_socket.send(response_code)
-
-            # client_socket.sendall(json_payload.encode("utf-8"))
+            self.send_response_code(client_socket, ServerResponseCodes.RegistrationSuccess)
         else:
             print(f"[ERROR] Registration code mismatch.")
-            client_socket.send(ServerResponseCodes.RegistrationFailed)
+            self.send_response_code(client_socket, ServerResponseCodes.RegistrationFailed)
 
     def handle_sending_user_pkey(self, client_socket):
         encrypted_payload = client_socket.recv(2048)
@@ -157,13 +157,10 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
                 verify_payload = {
                     "client_public_key": req_public_key_str
                 }
-                print("verify_payload: ", verify_payload)
                 payload = encode_server_response(verify_payload)
                 encrypted_msg_from_client = self.encrypt_message(client_socket, public_key_str, payload)
                 json_payload = json.dumps({"chunks": encrypted_msg_from_client})
-                response_code = encode_server_response_code(ServerResponseCodes.RegistrationSuccess)
-                client_socket.send(response_code)
-                print("here response_code: ", response_code)
+                self.send_response_code(client_socket, ServerResponseCodes.RegistrationSuccess)
                 client_socket.sendall(json_payload.encode("utf-8"))
                 print("[SUCCESS] Sending user public keys.")
 
@@ -175,37 +172,24 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
     def handle_send_msg_to_user(self, client_socket):
         encrypted_request = client_socket.recv(2048)
         verify_payload = self.decrypt_message(encrypted_request)
-        print("verify_payload: ", verify_payload)
-        my_phone_number = verify_payload["message_from"]
         send_msg_to_phone = verify_payload["message_to"]
         client_socket_to_send_msg = server.clients[send_msg_to_phone]["socket"]
         public_key_str = server.clients[send_msg_to_phone]["public_key"]
         payload = encode_server_response(verify_payload)
-        print("payload:", payload)
         encrypted_msg = self.encrypt_message(client_socket_to_send_msg, public_key_str, payload)
         json_payload = json.dumps({"chunks": encrypted_msg})
-        response_code = encode_server_response_code(ServerResponseCodes.UserSendsMessage)
-        client_socket_to_send_msg.send(response_code)
+        self.send_response_code(client_socket_to_send_msg, ServerResponseCodes.UserSendsMessage)
         client_socket_to_send_msg.sendall(json_payload.encode("utf-8"))
-
-        response_code = encode_server_response_code(ServerResponseCodes.SendingMessageToUser)
-        print("size of response_code: ", len(response_code))
-        client_socket.send(response_code)
-        # client_socket.sendall(json_payload.encode("utf-8"))
+        self.send_response_code(client_socket, ServerResponseCodes.SendingMessageToUser)
         print("[SUCCESS] Sending message to user.")
 
+    def handle_client_disconected(self):
+        
     def send_response_code(self, client_socket, response):
-        response_code = json.dumps({"response_code": response.value})
-        self.socket.send(response.encode("utf-8"))
+        response_code = encode_server_response_code(response)
+        client_socket.send(response_code)
 
     def encrypt_message(self, client_socket, client_public_key, payload, chunk_size=190):
-        # response = encode_server_response(
-        #     response_code=response_code_msg,
-        #     payload=payload
-        # )
-        # # response = encode_server_response(response_code, payload)
-        # message_bytes = response.encode("utf-8")
-
         if client_public_key is None:
             client_socket.send(payload)
         else:
@@ -251,130 +235,6 @@ VUQE0ySXS3OhzOpjn5VZOqQ=
 
 
 if __name__ == "__main__":
-    server = Server('127.0.0.1', 12345, 10)
+    server = Server(HOST, PORT, MAX_CLIENTS)
+    print("Server listening on port", PORT)
     server.listen()
-
-"""
-Function for server to send messages to specific clients
-def send_message_to_client():
-    while True:
-        target_client_id = input("Enter the client ID to send a message: ").strip()
-        if target_client_id not in clients:
-            print(f"Client {target_client_id} not found.")
-            continue
-
-        message = input("Enter the message to send: ").strip()
-        target_socket = clients[target_client_id]
-        try:
-            target_socket.send(f"[SERVER MESSAGE]: {message}".encode("utf-8"))
-        except Exception as e:
-            print(f"Failed to send message to {target_client_id}: {e}")
-
-
-# def handle_register_request(client_socket, payload):
-
-#     phone = payload.get("phone")
-#     password = payload.get("password")
-#     name = payload.get("name")
-#
-#     # Validate data
-#     if not phone or not password or not name:
-#         response = encode_server_response(ServerResponseCodes.RegistrationFailed,
-#                                           {"message": "Invalid registration data."})
-#         client_socket.send(response.encode())
-#         return
-#
-#     # Generate verification code
-#     verification_code = str(random.randint(100000, 999999))
-#
-#     # Save pending registration
-#     save_pending_registration(phone, password, name, verification_code)
-#
-#     # Send verification code to client
-#     response = encode_server_response(ServerResponseCodes.SendRegistrationCode,
-#                                       {"verification_code": verification_code})
-#     client_socket.send(response.encode())
-#
-#
-# def handle_verification_request(client_socket, payload):
-
-#     phone = payload.get("phone")
-#     verification_code = payload.get("verification_code")
-#
-#     # Validate data
-#     if not phone or not verification_code:
-#         response = encode_server_response(ServerResponseCodes.RegistrationFailed,
-#                                           {"message": "Invalid verification data."})
-#         client_socket.send(response.encode())
-#         return
-#
-#     # Verify the code
-#     success = verify_registration_code(phone, verification_code)
-#
-#     if success:
-#         response = encode_server_response(ServerResponseCodes.RegistrationSuccess,
-#                                           {"message": "Registration completed successfully."})
-#     else:
-#         response = encode_server_response(ServerResponseCodes.RegistrationFailed,
-#                                           {"message": "Invalid verification code."})
-#
-#     client_socket.send(response.encode())
-#
-#
-# # Handle individual client connections
-# def handle_client(client_socket, client_address, client_id):
-#     print(f"[NEW CONNECTION] {client_id} ({client_address}) connected.")
-#
-#     try:
-#         while True:
-#             # Receive message from client
-#             message = client_socket.recv(1024).decode("utf-8")
-#             if not message:
-#                 print(f"[DISCONNECT] {client_id} disconnected.")
-#                 break
-#
-#             print(f"[MESSAGE FROM {client_id}] {message}")
-#             if message.startswith("request_code"):
-#                 payload = decode_client_request(message)
-#                 handle_register_request(client_socket, payload)
-#                 print("payload: ", payload)
-#             else:
-#                 print("error1111")
-#
-#             # Parse and handle message
-#             if message.startswith("SEND:"):
-#                 message = message[5:]  # Remove 'SEND:' from the message
-#                 parts = message.split("|", 2)
-#
-#                 if len(parts) == 2:
-#                     target_client_id, msg_content = parts[0], parts[1]
-#                     if target_client_id in clients:
-#                         target_socket = clients[target_client_id]
-#                         try:
-#                             target_socket.send(f"Message from {client_id}: {msg_content}".encode("utf-8"))
-#                         except Exception as e:
-#                             print(f"[ERROR] Failed to send message to {target_client_id}: {e}")
-#                             client_socket.send(f"Failed to send message to {target_client_id}".encode("utf-8"))
-#                     else:
-#                         print("error2")
-#
-#                         client_socket.send(f"Client {target_client_id} not found.".encode("utf-8"))
-#                 else:
-#                     print("error3")
-#
-#                     client_socket.send("Invalid command format. Use SEND:<ID>|<Message>".encode("utf-8"))
-#             else:
-#                 print("error4")
-#
-#                 client_socket.send("Invalid command. Use SEND:<ID>|<Message>".encode("utf-8"))
-#
-#     except ConnectionResetError:
-#         print(f"[DISCONNECT] {client_id} disconnected.")
-#     finally:
-#         # Remove client from the global dictionary
-#         if client_id in clients:
-#             del clients[client_id]
-#         client_socket.close()
-#         print("error45")
-#
-"""
