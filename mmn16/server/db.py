@@ -1,6 +1,5 @@
 # db.py
 from typing import Optional
-from user import *
 
 
 # Temporary storage for pending registrations
@@ -20,7 +19,6 @@ class DB:
         return False
 
     def user_in_pending_list(self, phone_number):
-        print("pending registrations:", self.pending_registrations)
         if phone_number in self.pending_registrations:
             return True
         return False
@@ -54,7 +52,6 @@ class DB:
         return None
 
     def remove_user(self, phone_number):
-        print("here phone number", phone_number)
         user = self.get_user(phone_number)
         user.turn_off_connection()
 
